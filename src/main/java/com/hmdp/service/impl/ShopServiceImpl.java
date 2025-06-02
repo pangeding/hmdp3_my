@@ -1,5 +1,6 @@
 package com.hmdp.service.impl;
 
+import cn.hutool.core.util.BooleanUtil;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONUtil;
 import com.hmdp.dto.Result;
@@ -15,8 +16,7 @@ import javax.annotation.Resource;
 
 import java.util.concurrent.TimeUnit;
 
-import static com.hmdp.utils.RedisConstants.CACHE_SHOP_KEY;
-import static com.hmdp.utils.RedisConstants.CACHE_SHOP_TTL;
+import static com.hmdp.utils.RedisConstants.*;
 
 /**
  * <p>
@@ -34,7 +34,7 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
 
     @Override
     public Result queryById(Long id) {
-        String key = CACHE_SHOP_KEY + id;
+        /*String key = CACHE_SHOP_KEY + id;
         //1. 从redis查询缓存
         String shopJson = stringRedisTemplate.opsForValue().get(key);
         //2. 判断是否存在
@@ -47,15 +47,102 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         //4. 不存在，根据id查询数据库
         Shop shop = getById(id);
         if(shop == null){
+            //空值写入redis
+            stringRedisTemplate.opsForValue().set(key, "", CACHE_NULL_TTL, TimeUnit.MINUTES);
             //5. 不存在，返回错误
             return Result.fail("店铺不存在");
         }
 
         //6. 存在，写入redis
         stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(shop), CACHE_SHOP_TTL, TimeUnit.MINUTES);
+        return Result.ok(shop);*/
+
+        //缓存穿透
+        /*Shop shop = queryWithPenetration(id);
+        return Result.ok(shop);*/
+
+        //缓存击穿
+        Shop shop = queryWithMutex(id);
+        if(shop == null){
+            return Result.fail("店铺不存在");
+        }
         return Result.ok(shop);
     }
 
+    private boolean tryLock(String key){
+        Boolean flag = stringRedisTemplate.opsForValue().setIfAbsent(key, "1", 10l, TimeUnit.SECONDS);
+        return BooleanUtil.isTrue(flag);
+    }
+
+    private void unlock(String key){
+        stringRedisTemplate.delete(key);
+    }
+
+    /*public Shop queryWithPenetration(Long id) {
+        String key = CACHE_SHOP_KEY + id;
+        //1. 从redis查询缓存
+        String shopJson = stringRedisTemplate.opsForValue().get(key);
+        //2. 判断是否存在
+        if(StrUtil.isNotBlank(shopJson)){
+            //3. 存在，返回
+            Shop shop = JSONUtil.toBean(shopJson, Shop.class);
+            return shop;
+        }
+
+        //4. 不存在，根据id查询数据库
+        Shop shop = getById(id);
+        if(shop == null){
+            //空值写入redis
+            stringRedisTemplate.opsForValue().set(key, "", CACHE_NULL_TTL, TimeUnit.MINUTES);
+            //5. 不存在，返回错误
+            return null;
+        }
+
+        //6. 存在，写入redis
+        stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(shop), CACHE_SHOP_TTL, TimeUnit.MINUTES);
+        return shop;
+    }*/
+
+    public Shop queryWithMutex(Long id) {
+        String key = CACHE_SHOP_KEY + id;
+        //1. 从redis查询缓存
+        String shopJson = stringRedisTemplate.opsForValue().get(key);
+        //2. 判断是否存在
+        if(StrUtil.isNotBlank(shopJson)){
+            //3. 存在，返回
+            Shop shop = JSONUtil.toBean(shopJson, Shop.class);
+            return shop;
+        }
+
+        //4. 获取互斥锁
+        String lockKey = LOCK_SHOP_KEY + id;
+        Shop shop = null;
+        try {
+            boolean isLock = tryLock(lockKey);
+            if(!isLock){
+                Thread.sleep(50);
+                return queryWithMutex(id);
+            }
+            //4.2. 成功，根据id获取shop
+            shop = getById(id);
+            if(shop == null){
+                //空值写入redis
+                stringRedisTemplate.opsForValue().set(key, "", CACHE_NULL_TTL, TimeUnit.MINUTES);
+                //5. 不存在，返回错误
+                return null;
+            }
+
+            //6. 存在，写入redis
+            stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(shop), CACHE_SHOP_TTL, TimeUnit.MINUTES);
+        }
+        catch (InterruptedException e){
+            throw new RuntimeException(e);
+        }
+        finally {
+            unlock(lockKey);
+        }
+        return shop;
+    }
     @Override
     @Transactional
     public Result update(Shop shop) {
@@ -71,6 +158,7 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
 
         return Result.ok();
     }
+
 
 
 }
